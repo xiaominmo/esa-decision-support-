@@ -68,8 +68,13 @@ if submitted:
     c3.metric('Phenotype', result['phenotype'])
 
     st.subheader('Review suggestions')
+    st.info(result['review_summary'])
+    st.caption('These rule-based prompts are meant to support clinician review, not replace full clinical judgment.')
     for item in result['suggestions']:
-        st.write(f'- {item}')
+        st.markdown(f"**{item['priority']} priority: {item['title']}**")
+        st.write(item['rationale'])
+        for action in item['actions']:
+            st.write(f'- {action}')
 
     st.subheader('Input summary')
     st.json(values)
