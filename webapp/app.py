@@ -1,9 +1,9 @@
 import streamlit as st
 from inference import predict_case
 
-st.set_page_config(page_title='ESA Decision Support', layout='wide')
-st.title('ESA Low-Response Decision Support Prototype')
-st.caption('Local prototype based on the offline-trained model and phenotype centroids.')
+st.set_page_config(page_title='ESA Hyporesponse Decision Support', layout='wide')
+st.title('ESA Hyporesponse Decision Support Prototype')
+st.caption('Local prototype based on the offline-trained risk model and phenotype-guided review logic.')
 
 with st.sidebar:
     st.header('Patient-quarter input')
