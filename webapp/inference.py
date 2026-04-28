@@ -148,12 +148,12 @@ def review_suggestions(values: dict, phenotype: str, risk_level: str, risk_score
     else:
         suggestions.append(f'Risk context: predicted ESA low-response risk is {risk_score:.3f} ({risk_level}); if clinical low response persists, check whether recent events or missing labs explain discordance.')
 
-    if phenotype == 'MBD-dominant':
-        suggestions.append('Phenotype-specific focus: MBD-dominant; prioritize CKD-MBD optimization using PTH, phosphorus, calcium, and MBD medication adherence before ESA intensification.')
-    elif phenotype == 'Inflammation–underdialysis':
-        suggestions.append('Phenotype-specific focus: Inflammation–underdialysis; look for inflammatory/nutritional burden and inadequate delivered dialysis before ESA intensification.')
-    elif phenotype == 'IDH-dominant':
-        suggestions.append('Phenotype-specific focus: IDH-dominant; review intradialytic hypotension tolerance, ultrafiltration burden, target dry weight, antihypertensive timing, and cardiac status.')
+    if phenotype == 'MBD-dominant phenotype':
+        suggestions.append('Phenotype-specific focus: MBD-dominant phenotype; prioritize CKD-MBD optimization using PTH, phosphorus, calcium, and MBD medication adherence before ESA intensification.')
+    elif phenotype == 'Inflammation–malnutrition–underdialysis phenotype':
+        suggestions.append('Phenotype-specific focus: Inflammation–malnutrition–underdialysis phenotype; look for inflammatory/nutritional burden and inadequate delivered dialysis before ESA intensification.')
+    elif phenotype == 'Hemodynamic instability phenotype':
+        suggestions.append('Phenotype-specific focus: Hemodynamic instability phenotype; review intradialytic hypotension tolerance, ultrafiltration burden, target dry weight, antihypertensive timing, and cardiac status.')
     else:
         suggestions.append(f'Phenotype-specific focus: {phenotype}; align the review with the dominant abnormal clinical domain.')
 
@@ -189,11 +189,11 @@ def review_suggestions(values: dict, phenotype: str, risk_level: str, risk_score
     else:
         suggestions.append('Patient-specific driver: no single entered variable crosses the built-in review thresholds; use longitudinal Hb, ESA dose, ERI, iron indices, and recent clinical events to refine the assessment.')
 
-    if phenotype == 'MBD-dominant':
+    if phenotype == 'MBD-dominant phenotype':
         suggestions.append('Practical checklist: verify PTH/phosphorus/calcium trends, phosphate binder and vitamin D/calcimimetic adherence, dialysate calcium, and timing for reassessing Hb/ERI after MBD optimization.')
-    elif phenotype == 'Inflammation–underdialysis':
+    elif phenotype == 'Inflammation–malnutrition–underdialysis phenotype':
         suggestions.append('Practical checklist: screen for infection/access inflammation, nutrition-inflammation syndrome, delivered Kt/V/URR, session time, blood flow, dialyzer performance, access recirculation, and treatment adherence.')
-    elif phenotype == 'IDH-dominant':
+    elif phenotype == 'Hemodynamic instability phenotype':
         suggestions.append('Practical checklist: review interdialytic weight gain, ultrafiltration rate, target dry weight, antihypertensive schedule, dialysate cooling/sodium strategy, and need for cardiac evaluation.')
 
     return suggestions
