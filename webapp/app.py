@@ -1,9 +1,9 @@
 import streamlit as st
 from inference import predict_case
 
-st.set_page_config(page_title='ESA Hyporesponse Decision Support', layout='wide')
-st.title('ESA Hyporesponse Decision Support Prototype')
-st.caption('Local prototype based on the offline-trained risk model and phenotype-guided review logic.')
+st.set_page_config(page_title='ESA Decision Support', layout='wide')
+st.title('ESA Low-Response Decision Support Prototype')
+st.caption('Local prototype based on the offline-trained model and revised 2026-04-27 phenotype centroids.')
 
 with st.sidebar:
     st.header('Patient-quarter input')
@@ -25,12 +25,9 @@ with st.sidebar:
     creatinine = st.number_input('Creatinine', min_value=0.0, value=800.0)
     iron_use_flag = 1 if st.checkbox('Iron use', value=True) else 0
     hif_use_flag = 1 if st.checkbox('HIF use', value=False) else 0
-    pre_sbp_q1_mean = st.number_input('Pre-dialysis SBP', min_value=50.0, value=145.0)
-    pre_dbp_q1_mean = st.number_input('Pre-dialysis DBP', min_value=30.0, value=80.0)
-    pre_sbp_q1_std = st.number_input('Pre-dialysis SBP SD', min_value=0.0, value=0.0)
-    pre_dbp_q1_std = st.number_input('Pre-dialysis DBP SD', min_value=0.0, value=0.0)
-    idh_any_q1 = 1 if st.checkbox('Intradialytic hypotension', value=False) else 0
-    idh_count_q1 = st.number_input('Intradialytic hypotension count', min_value=0, value=0)
+    current_pre_sbp_mean = st.number_input('Current-quarter pre-dialysis SBP', min_value=50.0, value=145.0)
+    current_pre_dbp_mean = st.number_input('Current-quarter pre-dialysis DBP', min_value=30.0, value=80.0)
+    current_idh_any = 1 if st.checkbox('Current-quarter intradialytic hypotension', value=False) else 0
     submitted = st.button('Run prediction')
 
 if submitted:
@@ -54,12 +51,12 @@ if submitted:
         'creatinine': creatinine,
         'iron_use_flag': iron_use_flag,
         'hif_use_flag': hif_use_flag,
-        'pre_sbp_q1_mean': pre_sbp_q1_mean,
-        'pre_dbp_q1_mean': pre_dbp_q1_mean,
-        'pre_sbp_q1_std': pre_sbp_q1_std,
-        'pre_dbp_q1_std': pre_dbp_q1_std,
-        'idh_any_q1': idh_any_q1,
-        'idh_count_q1': idh_count_q1,
+        'current_pre_sbp_mean': current_pre_sbp_mean,
+        'current_pre_dbp_mean': current_pre_dbp_mean,
+        'current_idh_any': current_idh_any,
+        'pre_sbp_q1_mean': current_pre_sbp_mean,
+        'pre_dbp_q1_mean': current_pre_dbp_mean,
+        'idh_any_q1': current_idh_any,
     }
     result = predict_case(values)
     c1, c2, c3 = st.columns(3)
@@ -68,13 +65,8 @@ if submitted:
     c3.metric('Phenotype', result['phenotype'])
 
     st.subheader('Review suggestions')
-    st.info(result['review_summary'])
-    st.caption('These rule-based prompts are meant to support clinician review, not replace full clinical judgment.')
     for item in result['suggestions']:
-        st.markdown(f"**{item['priority']} priority: {item['title']}**")
-        st.write(item['rationale'])
-        for action in item['actions']:
-            st.write(f'- {action}')
+        st.write(f'- {item}')
 
     st.subheader('Input summary')
     st.json(values)
