@@ -7,23 +7,45 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parents[1]
 PRED_DIR = BASE_DIR / 'clinical_prediction'
 CLUSTER_DIR = BASE_DIR / 'phenotype_clustering'
+CLUSTER_METADATA = CLUSTER_DIR / 'cluster_metadata.json'
+CLUSTER_DATA = CLUSTER_DIR / 'phenotype_analysis_dataset_revised.csv'
+
+
+def enrich_cluster_meta(cluster_meta: dict) -> dict:
+    if {'imputation_values', 'scaler_mean', 'scaler_scale'}.issubset(cluster_meta):
+        return cluster_meta
+    if not CLUSTER_DATA.exists():
+        return cluster_meta
+    features = cluster_meta['cluster_features']
+    df = pd.read_csv(CLUSTER_DATA, usecols=features)
+    cluster_input = df.apply(pd.to_numeric, errors='coerce')
+    imputation = cluster_input.median(numeric_only=True).fillna(0)
+    filled = cluster_input.fillna(imputation).fillna(0)
+    scale = filled.std(axis=0, ddof=0).replace(0, 1)
+    cluster_meta = cluster_meta.copy()
+    cluster_meta['imputation_values'] = imputation.to_dict()
+    cluster_meta['scaler_mean'] = filled.mean(axis=0).to_dict()
+    cluster_meta['scaler_scale'] = scale.to_dict()
+    return cluster_meta
 
 
 def load_assets():
     model_path = next(PRED_DIR.glob('best_model_*.joblib'))
     model = joblib.load(model_path)
-    with open(CLUSTER_DIR / 'cluster_metadata.json', 'r', encoding='utf-8') as f:
+    with open(CLUSTER_METADATA, 'r', encoding='utf-8') as f:
         cluster_meta = json.load(f)
+    cluster_meta = enrich_cluster_meta(cluster_meta)
     return model, cluster_meta
 
 
 MODEL, CLUSTER_META = load_assets()
 
-HEMODYNAMIC_PHENOTYPE = 'Hemodynamic instability / mixed phenotype'
-CKD_MBD_PHENOTYPE = 'CKD-MBD dominant phenotype'
-DIALYSIS_BURDEN_PHENOTYPE = 'Dialysis inadequacy / high-burden phenotype'
 
-PRIORITY_ORDER = {'Phenotype': -1, 'High': 0, 'Moderate': 1, 'Context': 2}
+def to_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
 
 
 def build_input_dataframe(values: dict) -> pd.DataFrame:
@@ -35,6 +57,7 @@ def build_input_dataframe(values: dict) -> pd.DataFrame:
     row.setdefault('primary_disease', 'Unknown')
     row.setdefault('esa_use', 'Use')
     row.setdefault('esa_type', 'Unknown')
+    row.setdefault('esa_unit', 'IU')
     row.setdefault('iron_use', 'Use' if row.get('iron_use_flag', 0) else 'No use')
     row.setdefault('hif_use', 'Use' if row.get('hif_use_flag', 0) else 'No use')
     row.setdefault('eq_esa_dose', row.get('esa_dose', 0.0) if row.get('esa_route') == 'Subcutaneous' else row.get('esa_dose', 0.0) * 2 / 3)
@@ -44,24 +67,16 @@ def build_input_dataframe(values: dict) -> pd.DataFrame:
     row.setdefault('eri', eq / wt / (hb / 10.0) if hb and wt and hb > 0 and wt > 0 else np.nan)
     row.setdefault('esa_use_flag', 1)
     row.setdefault('prior_low_response_proxy', 0)
-    for col in [
-        'delta_hb',
-        'delta_esa_dose',
-        'delta_eri',
-        'delta_crp',
-        'delta_albumin',
-        'delta_ktv',
-        'delta_pth',
-        'pre_sbp_q1_std',
-        'pre_dbp_q1_std',
-        'idh_count_q1',
-        'pre_sbp_q2_mean',
-        'pre_dbp_q2_mean',
-        'idh_any_q2',
-        'pre_sbp_q3_mean',
-        'pre_dbp_q3_mean',
-        'idh_any_q3',
-    ]:
+    row.setdefault('current_pre_sbp_mean', row.get('pre_sbp_q1_mean', np.nan))
+    row.setdefault('current_pre_dbp_mean', row.get('pre_dbp_q1_mean', np.nan))
+    row.setdefault('current_idh_any', row.get('idh_any_q1', 0))
+    row.setdefault('pre_sbp_q1_mean', row.get('current_pre_sbp_mean', 0))
+    row.setdefault('pre_dbp_q1_mean', row.get('current_pre_dbp_mean', 0))
+    row.setdefault('pre_sbp_q1_std', 0)
+    row.setdefault('pre_dbp_q1_std', 0)
+    row.setdefault('idh_any_q1', row.get('current_idh_any', 0))
+    row.setdefault('idh_count_q1', row.get('current_idh_any', 0))
+    for col in ['delta_hb', 'delta_esa_dose', 'delta_eri', 'delta_crp', 'delta_albumin', 'delta_ktv', 'delta_pth', 'pre_sbp_q2_mean', 'pre_dbp_q2_mean', 'idh_any_q2', 'pre_sbp_q3_mean', 'pre_dbp_q3_mean', 'idh_any_q3']:
         row.setdefault(col, 0)
     return pd.DataFrame([row])
 
@@ -76,400 +91,123 @@ def assign_risk_level(prob: float) -> str:
     return 'Very high'
 
 
-def derive_case_features(values: dict) -> dict:
-    esa_dose = float(values.get('esa_dose', 0.0) or 0.0)
-    hb = float(values.get('hb', 0.0) or 0.0)
-    weight = float(values.get('dry_weight', 0.0) or 0.0)
-    route = values.get('esa_route')
-    eq_esa_dose = esa_dose if route == 'Subcutaneous' else esa_dose * 2 / 3
-    eri = np.nan
-    if hb > 0 and weight > 0:
-        eri = eq_esa_dose / weight / (hb / 10.0)
-    return {'eq_esa_dose': eq_esa_dose, 'eri': eri}
+def prepare_phenotype_values(values: dict) -> dict:
+    prepared = values.copy()
+    crp = to_float(prepared.get('crp'))
+    cap = to_float(CLUSTER_META.get('crp_p99_cap'))
+    if np.isfinite(crp):
+        crp_winsor99 = min(max(crp, 0.0), cap) if np.isfinite(cap) else max(crp, 0.0)
+        prepared['crp_winsor99'] = crp_winsor99
+        prepared['log_crp_w99'] = np.log1p(crp_winsor99)
+    prepared.setdefault('current_pre_sbp_mean', prepared.get('pre_sbp_q1_mean', np.nan))
+    prepared.setdefault('current_pre_dbp_mean', prepared.get('pre_dbp_q1_mean', np.nan))
+    prepared.setdefault('current_idh_any', prepared.get('idh_any_q1', 0))
+    return prepared
 
 
-def add_phenotype_signal(scores: dict, reasons: dict, label: str, points: float, reason: str) -> None:
-    scores[label] += points
-    reasons[label].append(reason)
+def assign_phenotype(values: dict) -> str:
+    centroids = np.array(CLUSTER_META.get('centroids_scaled', CLUSTER_META.get('centroids')), dtype=float)
+    feature_order = CLUSTER_META['cluster_features']
+    name_map = {int(k): v for k, v in CLUSTER_META['cluster_name_map'].items()}
+    prepared = prepare_phenotype_values(values)
+    imputation = CLUSTER_META.get('imputation_values', {})
+    mean = CLUSTER_META.get('scaler_mean', {})
+    scale = CLUSTER_META.get('scaler_scale', {})
+    arr = []
+    for col in feature_order:
+        value = to_float(prepared.get(col))
+        if not np.isfinite(value):
+            value = to_float(imputation.get(col, 0))
+        if mean and scale:
+            denom = to_float(scale.get(col, 1))
+            value = (value - to_float(mean.get(col, 0))) / (denom if denom else 1)
+        arr.append(value)
+    dists = np.linalg.norm(centroids - np.array(arr, dtype=float), axis=1)
+    return name_map[int(np.argmin(dists))]
 
 
-def select_phenotype_label(scores: dict) -> str:
-    hemo = scores[HEMODYNAMIC_PHENOTYPE]
-    ckd_mbd = scores[CKD_MBD_PHENOTYPE]
-    dialysis = scores[DIALYSIS_BURDEN_PHENOTYPE]
-    if hemo >= 4 and hemo >= ckd_mbd and hemo + 0.5 >= dialysis:
-        return HEMODYNAMIC_PHENOTYPE
-    if ckd_mbd >= 3 and ckd_mbd >= hemo and ckd_mbd + 0.5 >= dialysis:
-        return CKD_MBD_PHENOTYPE
-    return max(scores, key=scores.get)
+def review_suggestions(values: dict, phenotype: str, risk_level: str, risk_score: float) -> list[str]:
+    suggestions = []
+    hb = to_float(values.get('hb'))
+    eri = to_float(values.get('eri'))
+    crp = to_float(values.get('crp'))
+    albumin = to_float(values.get('albumin'))
+    ktv = to_float(values.get('ktv'))
+    urr = to_float(values.get('urr'))
+    pth = to_float(values.get('pth'))
+    calcium = to_float(values.get('calcium'))
+    phosphorus = to_float(values.get('phosphorus'))
+    pre_sbp = to_float(values.get('current_pre_sbp_mean'))
+    pre_dbp = to_float(values.get('current_pre_dbp_mean'))
+    current_idh = int(to_float(values.get('current_idh_any')) == 1)
 
-
-def assign_phenotype_profile(values: dict) -> dict:
-    derived = derive_case_features(values)
-    eq_esa_dose = derived['eq_esa_dose']
-    eri = derived['eri']
-    scores = {
-        HEMODYNAMIC_PHENOTYPE: 0.0,
-        CKD_MBD_PHENOTYPE: 0.0,
-        DIALYSIS_BURDEN_PHENOTYPE: 0.0,
-    }
-    reasons = {label: [] for label in scores}
-
-    idh_any_q1 = int(values.get('idh_any_q1', 0) or 0)
-    idh_count_q1 = int(values.get('idh_count_q1', 0) or 0)
-    sbp = float(values.get('pre_sbp_q1_mean', 0.0) or 0.0)
-    dbp = float(values.get('pre_dbp_q1_mean', 0.0) or 0.0)
-    sbp_sd = float(values.get('pre_sbp_q1_std', 0.0) or 0.0)
-    dbp_sd = float(values.get('pre_dbp_q1_std', 0.0) or 0.0)
-    if idh_any_q1 == 1:
-        add_phenotype_signal(scores, reasons, HEMODYNAMIC_PHENOTYPE, 4.0, 'IDH reported in the current quarter')
-    if idh_count_q1 > 0:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            HEMODYNAMIC_PHENOTYPE,
-            min(2.0, idh_count_q1 * 0.5),
-            f'IDH count is {idh_count_q1}',
-        )
-    if sbp < 110:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            HEMODYNAMIC_PHENOTYPE,
-            1.0 + min(1.5, (110 - sbp) / 10.0),
-            f'pre-dialysis SBP is low at {sbp:.0f}',
-        )
-    if dbp < 60:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            HEMODYNAMIC_PHENOTYPE,
-            1.0 + min(1.0, (60 - dbp) / 10.0),
-            f'pre-dialysis DBP is low at {dbp:.0f}',
-        )
-    if sbp_sd >= 15:
-        add_phenotype_signal(scores, reasons, HEMODYNAMIC_PHENOTYPE, 0.8, f'SBP variability is high (SD {sbp_sd:.1f})')
-    if dbp_sd >= 10:
-        add_phenotype_signal(scores, reasons, HEMODYNAMIC_PHENOTYPE, 0.6, f'DBP variability is high (SD {dbp_sd:.1f})')
-
-    pth = float(values.get('pth', 0.0) or 0.0)
-    phosphorus = float(values.get('phosphorus', 0.0) or 0.0)
-    calcium = float(values.get('calcium', 0.0) or 0.0)
-    dialysis_age = float(values.get('dialysis_age', 0.0) or 0.0)
-    if pth > 300:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            CKD_MBD_PHENOTYPE,
-            2.0 + (1.0 if pth > 600 else 0.0),
-            f'PTH is elevated at {pth:.0f}',
-        )
-    if phosphorus > 1.8:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            CKD_MBD_PHENOTYPE,
-            1.5 + (0.5 if phosphorus > 2.2 else 0.0),
-            f'phosphorus is elevated at {phosphorus:.2f}',
-        )
-    if calcium < 2.1 or calcium > 2.5:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            CKD_MBD_PHENOTYPE,
-            0.5,
-            f'calcium is outside the usual review range at {calcium:.2f}',
-        )
-    if dialysis_age >= 36:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            CKD_MBD_PHENOTYPE,
-            0.5,
-            f'dialysis vintage is relatively long at {dialysis_age:.0f} months',
-        )
-
-    ktv = float(values.get('ktv', 0.0) or 0.0)
-    urr = float(values.get('urr', 0.0) or 0.0)
-    crp = float(values.get('crp', 0.0) or 0.0)
-    albumin = float(values.get('albumin', 0.0) or 0.0)
-    hb = float(values.get('hb', 0.0) or 0.0)
-    iron_use_flag = int(values.get('iron_use_flag', 0) or 0)
-    if ktv < 1.2:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            2.0 + (1.0 if ktv < 1.0 else 0.0),
-            f'Kt/V is low at {ktv:.2f}',
-        )
-    if urr < 65:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            1.5 + (0.5 if urr < 60 else 0.0),
-            f'URR is low at {urr:.1f}%',
-        )
-    if crp > 5:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            1.5 + (0.5 if crp > 10 else 0.0),
-            f'CRP is elevated at {crp:.1f}',
-        )
-    if albumin < 35:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            1.5 + (0.5 if albumin < 32 else 0.0),
-            f'albumin is low at {albumin:.1f} g/L',
-        )
-    if hb < 100:
-        add_phenotype_signal(scores, reasons, DIALYSIS_BURDEN_PHENOTYPE, 1.0, f'hemoglobin remains low at {hb:.1f} g/L')
-    if eq_esa_dose >= 10000:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            1.0 + (0.5 if eq_esa_dose >= 15000 else 0.0),
-            f'equivalent ESA dose is high at {eq_esa_dose:.0f} IU/week',
-        )
-    if not np.isnan(eri) and eri >= 15:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            1.0 + (0.5 if eri >= 20 else 0.0),
-            f'ERI is elevated at {eri:.2f}',
-        )
-    if iron_use_flag == 0 and hb < 100:
-        add_phenotype_signal(
-            scores,
-            reasons,
-            DIALYSIS_BURDEN_PHENOTYPE,
-            0.5,
-            'iron support is not checked despite low hemoglobin',
-        )
-
-    label = select_phenotype_label(scores)
-    top_reasons = reasons[label][:3]
-    if not top_reasons:
-        top_reasons = ['no dominant phenotype-specific trigger was captured from the limited web inputs']
-    return {
-        'label': label,
-        'scores': scores,
-        'reasons': reasons,
-        'top_reasons': top_reasons,
-        'derived': derived,
-    }
-
-
-def make_review_item(priority: str, title: str, rationale: str, actions: list[str]) -> dict:
-    return {
-        'priority': priority,
-        'title': title,
-        'rationale': rationale,
-        'actions': actions,
-    }
-
-
-def build_phenotype_focus_item(phenotype_profile: dict) -> dict:
-    phenotype = phenotype_profile['label']
-    rationale = 'Phenotype assignment is currently driven by: ' + '; '.join(phenotype_profile['top_reasons']) + '.'
-    if phenotype == HEMODYNAMIC_PHENOTYPE:
-        actions = [
-            'Treat intradialytic instability as the leading review focus before escalating ESA in isolation.',
-            'Review ultrafiltration rate, dry-weight target, session completion, and antihypertensive timing.',
-            'If hypotension is recurrent, reassess anemia response after hemodynamic tolerance improves.',
-        ]
-    elif phenotype == CKD_MBD_PHENOTYPE:
-        actions = [
-            'Review CKD-MBD control first, especially serial PTH, phosphorus, calcium, and treatment adherence.',
-            'Check phosphate binder exposure, vitamin D strategy, calcimimetic use, and dialysis phosphate clearance.',
-            'Reassess ESA responsiveness after mineral-bone disorder drivers are better controlled.',
-        ]
+    if risk_level in {'High', 'Very high'}:
+        suggestions.append(f'Risk context: predicted ESA low-response risk is {risk_score:.3f} ({risk_level}); review reversible drivers before reflexive ESA dose escalation.')
+    elif risk_level == 'Intermediate':
+        suggestions.append(f'Risk context: predicted ESA low-response risk is {risk_score:.3f} ({risk_level}); prioritize modifiable contributors before routine ESA adjustment.')
     else:
-        actions = [
-            'Treat dialysis delivery and overall treatment burden as the leading phenotype-aligned review target.',
-            'Review adequacy, missed or shortened sessions, access function, inflammation, nutrition, and iron availability together.',
-            'Avoid interpreting ESA dose requirement in isolation until these higher-burden contributors are reviewed.',
-        ]
-    return make_review_item('Phenotype', f'Primary phenotype-aligned focus: {phenotype}', rationale, actions)
+        suggestions.append(f'Risk context: predicted ESA low-response risk is {risk_score:.3f} ({risk_level}); if clinical low response persists, check whether recent events or missing labs explain discordance.')
 
+    if phenotype == 'MBD-dominant':
+        suggestions.append('Phenotype-specific focus: MBD-dominant; prioritize CKD-MBD optimization using PTH, phosphorus, calcium, and MBD medication adherence before ESA intensification.')
+    elif phenotype == 'Inflammation–underdialysis':
+        suggestions.append('Phenotype-specific focus: Inflammation–underdialysis; look for inflammatory/nutritional burden and inadequate delivered dialysis before ESA intensification.')
+    elif phenotype == 'IDH-dominant':
+        suggestions.append('Phenotype-specific focus: IDH-dominant; review intradialytic hypotension tolerance, ultrafiltration burden, target dry weight, antihypertensive timing, and cardiac status.')
+    else:
+        suggestions.append(f'Phenotype-specific focus: {phenotype}; align the review with the dominant abnormal clinical domain.')
 
-def build_review_summary(risk_level: str, phenotype_profile: dict, items: list[dict]) -> str:
-    phenotype = phenotype_profile['label']
-    if items:
-        top_priority = items[0]['priority']
-        return (
-            f"Predicted risk is {risk_level.lower()} and the current web-input phenotype is "
-            f"'{phenotype}'. Prioritize the {top_priority.lower()} review items below before "
-            "assuming isolated ESA dose escalation is the best next step."
-        )
-    return (
-        f"Predicted risk is {risk_level.lower()} with a phenotype pattern closest to "
-        f"'{phenotype}'. No major rule-based flags were triggered from the limited web inputs, "
-        "so trend data, iron studies, bleeding history, and recent intercurrent illness still "
-        "need clinician review."
-    )
+    patient_findings = []
+    if np.isfinite(hb) and hb < 100:
+        patient_findings.append(f'Hb {hb:.1f} g/L is low; confirm Hb trend, bleeding/hemolysis, iron status, inflammation, and recent ESA exposure.')
+    if np.isfinite(eri) and eri > 15:
+        patient_findings.append(f'ERI {eri:.1f} is high; treat reversible resistance drivers before further dose escalation when possible.')
+    if np.isfinite(crp) and crp > 5:
+        patient_findings.append(f'CRP {crp:.1f} is elevated; assess infection, vascular access inflammation, recent hospitalization, and chronic inflammatory burden.')
+    if np.isfinite(albumin) and albumin < 35:
+        patient_findings.append(f'Albumin {albumin:.1f} g/L is low; assess protein-energy wasting, inflammation, appetite, and dialysis adequacy.')
+    if (np.isfinite(ktv) and ktv < 1.2) or (np.isfinite(urr) and urr < 65):
+        ktv_text = f'{ktv:.2f}' if np.isfinite(ktv) else 'missing'
+        urr_text = f'{urr:.1f}' if np.isfinite(urr) else 'missing'
+        patient_findings.append(f'Dialysis adequacy is borderline/low (Kt/V {ktv_text}, URR {urr_text}%); review delivered treatment time, blood flow, dialyzer, access function, and missed or shortened sessions.')
+    if np.isfinite(pth) and pth > 300:
+        patient_findings.append(f'PTH {pth:.1f} is elevated; review secondary hyperparathyroidism control and MBD therapy.')
+    if np.isfinite(phosphorus) and phosphorus > 1.78:
+        patient_findings.append(f'Phosphorus {phosphorus:.2f} mmol/L is elevated; review dietary phosphate load, binder use, and dialysis phosphate removal.')
+    if np.isfinite(calcium) and (calcium < 2.10 or calcium > 2.50):
+        patient_findings.append(f'Calcium {calcium:.2f} mmol/L is outside the usual target range; interpret PTH and phosphate management in that context.')
+    if current_idh:
+        bp_text = ''
+        if np.isfinite(pre_sbp) and np.isfinite(pre_dbp):
+            bp_text = f' with pre-dialysis BP {pre_sbp:.0f}/{pre_dbp:.0f} mmHg'
+        patient_findings.append(f'Current-quarter intradialytic hypotension is present{bp_text}; review ultrafiltration rate, dry weight, interdialytic weight gain, antihypertensive timing, dialysate temperature/sodium, and cardiac tolerance.')
+    if values.get('iron_use_flag', 0) == 0:
+        patient_findings.append('No current iron use is recorded; check ferritin and TSAT before attributing low response to ESA resistance alone.')
 
+    if patient_findings:
+        suggestions.extend(f'Patient-specific driver: {finding}' for finding in patient_findings)
+    else:
+        suggestions.append('Patient-specific driver: no single entered variable crosses the built-in review thresholds; use longitudinal Hb, ESA dose, ERI, iron indices, and recent clinical events to refine the assessment.')
 
-def review_suggestions(values: dict, risk_level: str, phenotype_profile: dict) -> dict:
-    phenotype = phenotype_profile['label']
-    derived = phenotype_profile['derived']
-    eq_esa_dose = derived['eq_esa_dose']
-    eri = derived['eri']
-    items = [build_phenotype_focus_item(phenotype_profile)]
+    if phenotype == 'MBD-dominant':
+        suggestions.append('Practical checklist: verify PTH/phosphorus/calcium trends, phosphate binder and vitamin D/calcimimetic adherence, dialysate calcium, and timing for reassessing Hb/ERI after MBD optimization.')
+    elif phenotype == 'Inflammation–underdialysis':
+        suggestions.append('Practical checklist: screen for infection/access inflammation, nutrition-inflammation syndrome, delivered Kt/V/URR, session time, blood flow, dialyzer performance, access recirculation, and treatment adherence.')
+    elif phenotype == 'IDH-dominant':
+        suggestions.append('Practical checklist: review interdialytic weight gain, ultrafiltration rate, target dry weight, antihypertensive schedule, dialysate cooling/sodium strategy, and need for cardiac evaluation.')
 
-    crp = float(values.get('crp', 0.0) or 0.0)
-    if crp > 5:
-        items.append(
-            make_review_item(
-                'High',
-                'Inflammatory burden may be contributing to ESA hyporesponse',
-                f"CRP is {crp:.1f}, above the review threshold of 5.",
-                [
-                    'Look for reversible inflammatory sources such as vascular access infection, intercurrent illness, or tissue inflammation.',
-                    'Interpret CRP together with albumin trend and recent dialysis events before further ESA escalation.',
-                    'If inflammation is active, recheck Hb response after the reversible driver is treated.',
-                ],
-            )
-        )
-
-    albumin = float(values.get('albumin', 0.0) or 0.0)
-    if albumin < 35:
-        items.append(
-            make_review_item(
-                'High',
-                'Nutritional or catabolic stress deserves targeted review',
-                f"Albumin is {albumin:.1f} g/L, below the review threshold of 35 g/L.",
-                [
-                    'Review recent oral intake, weight trend, catabolic illness, and gastrointestinal losses.',
-                    'Low albumin together with elevated CRP should raise concern for combined inflammation and malnutrition.',
-                    'Consider correcting reversible nutritional barriers before attributing poor response only to ESA dosing.',
-                ],
-            )
-        )
-
-    ktv = float(values.get('ktv', 0.0) or 0.0)
-    urr = float(values.get('urr', 0.0) or 0.0)
-    if ktv < 1.2 or urr < 65:
-        items.append(
-            make_review_item(
-                'High',
-                'Delivered dialysis adequacy may be limiting anemia control',
-                f"Kt/V is {ktv:.2f} and URR is {urr:.1f}%; the review targets here are Kt/V >= 1.2 and URR >= 65%.",
-                [
-                    'Review delivered treatment time, missed or shortened sessions, blood flow, dialyzer performance, and access function.',
-                    'If adequacy is persistently low, address that before further increasing ESA exposure.',
-                    'Repeat anemia assessment after adequacy issues are corrected to see whether dose demand falls.',
-                ],
-            )
-        )
-
-    pth = float(values.get('pth', 0.0) or 0.0)
-    phosphorus = float(values.get('phosphorus', 0.0) or 0.0)
-    if pth > 300 or phosphorus > 1.8:
-        items.append(
-            make_review_item(
-                'High',
-                'CKD-MBD control may be worsening ESA responsiveness',
-                f"PTH is {pth:.0f} and phosphorus is {phosphorus:.2f}; these values suggest CKD-MBD review is warranted.",
-                [
-                    'Review phosphate binder adherence, dialysis phosphate clearance, vitamin D strategy, and calcimimetic use if applicable.',
-                    'Interpret PTH together with calcium and phosphorus trends instead of a single isolated value.',
-                    'Correcting uncontrolled CKD-MBD may reduce the need for further ESA escalation.',
-                ],
-            )
-        )
-
-    idh_any_q1 = int(values.get('idh_any_q1', 0) or 0)
-    idh_count_q1 = int(values.get('idh_count_q1', 0) or 0)
-    sbp = float(values.get('pre_sbp_q1_mean', 0.0) or 0.0)
-    dbp = float(values.get('pre_dbp_q1_mean', 0.0) or 0.0)
-    if idh_any_q1 == 1 or idh_count_q1 > 0 or sbp < 110 or dbp < 60:
-        rationale_bits = []
-        if idh_any_q1 == 1 or idh_count_q1 > 0:
-            rationale_bits.append(f"IDH flag/count: {idh_any_q1}/{idh_count_q1}")
-        if sbp < 110:
-            rationale_bits.append(f"pre-dialysis SBP {sbp:.0f}")
-        if dbp < 60:
-            rationale_bits.append(f"pre-dialysis DBP {dbp:.0f}")
-        items.append(
-            make_review_item(
-                'High',
-                'Hemodynamic instability may be interfering with effective treatment delivery',
-                '; '.join(rationale_bits) if rationale_bits else 'Hemodynamic review triggered by the current input pattern.',
-                [
-                    'Review ultrafiltration strategy, dry-weight target, and antihypertensive timing.',
-                    'Check whether hypotension is shortening sessions or reducing delivered dialysis dose.',
-                    'If instability is recurrent, reassess anemia management after hemodynamic tolerance improves.',
-                ],
-            )
-        )
-
-    hb = float(values.get('hb', 0.0) or 0.0)
-    iron_use_flag = int(values.get('iron_use_flag', 0) or 0)
-    if iron_use_flag == 0 and (hb < 100 or eq_esa_dose >= 10000):
-        items.append(
-            make_review_item(
-                'Moderate',
-                'Iron availability should be checked before assuming ESA resistance',
-                f"Iron use is currently unchecked, while hemoglobin is {hb:.1f} g/L and estimated equivalent ESA dose is {eq_esa_dose:.0f} IU/week.",
-                [
-                    'Review ferritin, transferrin saturation, recent blood loss, and access-related blood loss.',
-                    'If iron indices are borderline, correct iron deficiency before making large ESA dose increases.',
-                    'Interpret iron need in the context of inflammation because functional iron deficiency can coexist with elevated CRP.',
-                ],
-            )
-        )
-
-    if hb < 100 and (eq_esa_dose >= 10000 or (not np.isnan(eri) and eri >= 15)):
-        eri_text = 'not available' if np.isnan(eri) else f'{eri:.2f}'
-        items.append(
-            make_review_item(
-                'Moderate',
-                'Current ESA exposure is high relative to the observed hemoglobin response',
-                f"Hemoglobin is {hb:.1f} g/L, equivalent ESA dose is {eq_esa_dose:.0f} IU/week, and estimated ERI is {eri_text}.",
-                [
-                    'Confirm that the recorded ESA route and dose are accurate before interpreting the result.',
-                    'Review reversible drivers first instead of escalating ESA dose in isolation.',
-                    'Use repeat Hb trend and interval clinical events to judge whether poor response is persistent or transient.',
-                ],
-            )
-        )
-
-    items.append(
-        make_review_item(
-            'Context',
-            'Phenotype rationale',
-            'The phenotype-focused review is assigned from the limited web inputs available in this calculator and should be interpreted together with full longitudinal clinical data.',
-            [
-                'The drivers listed in the phenotype-focused item above explain why this phenotype was selected from the available web inputs.',
-            ],
-        )
-    )
-
-    items.sort(key=lambda item: PRIORITY_ORDER[item['priority']])
-    return {
-        'summary': build_review_summary(risk_level, phenotype_profile, items),
-        'items': items,
-    }
+    return suggestions
 
 
 def predict_case(values: dict) -> dict:
     df = build_input_dataframe(values)
+    row = df.iloc[0].to_dict()
     prob = float(MODEL.predict_proba(df)[0, 1])
+    phenotype = assign_phenotype(row)
     risk_level = assign_risk_level(prob)
-    phenotype_profile = assign_phenotype_profile(values)
-    review = review_suggestions(values, risk_level, phenotype_profile)
     return {
         'risk_score': prob,
         'risk_level': risk_level,
-        'phenotype': phenotype_profile['label'],
-        'review_summary': review['summary'],
-        'suggestions': review['items'],
+        'phenotype': phenotype,
+        'suggestions': review_suggestions(row, phenotype, risk_level, prob),
     }
